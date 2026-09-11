@@ -42,25 +42,19 @@ const STEM='#73bf2e', LIP='#8fdc3f', RIND='#3f6a17', INK='#4a3a1a',
       BODY='#ffd94a', WING='#fff4c2', BEAK='#ff9b2f', BELLY='#ffb733';
 
 let video, pose, running=false;
-let lo=0.40, hi=0.60, targetU=0.5, faceSeen=false, faceMiss=999;
+let noseY=0.5, faceSeen=false, faceMiss=999;   // 1:1 face control: bird sits at the nose's height
 let bird=null, pipes=[], score=0, best=0, groundY=0, phase='idle', overAt=0;
-const MINSPAN=0.10;
 function groundOf(h){ return Math.max(64, h*0.11); }
 function spacing(w){ return Math.max(230, w*0.64); }
-function spawnPipe(x){ const playH=H-groundOf(H);
-  const gap=Math.max(playH*0.30,(0.30-score*0.006)*playH), top=playH*0.13, lowest=playH-gap-top;
-  pipes.push({x, gy: top+Math.random()*lowest, gap, w:Math.max(58,W*0.16), passed:false}); }
+function spawnPipe(x){
+  const gap=Math.max(H*0.28,(0.32-score*0.005)*H);
+  const cMin=0.38*H, cMax=0.62*H, center=cMin+Math.random()*(cMax-cMin);   // gap centre in the face band
+  pipes.push({x, gy: center-gap/2, gap, w:Math.max(58,W*0.16), passed:false}); }
 function startRun(){ groundY=H-groundOf(H); lo=0.40; hi=0.60; targetU=0.5; faceMiss=999;
   bird={x:W*0.30,y:H*0.45,r:Math.max(17,Math.min(W*0.06,H*0.036)),py:H*0.45}; pipes=[]; score=0;
   spawnPipe(W*1.7); spawnPipe(W*1.7+spacing(W)); phase='play'; }
 
-function feedNose(ny){
-  faceSeen=true; faceMiss=0;
-  if(ny<lo) lo=ny; else lo+=(ny-lo)*0.02;
-  if(ny>hi) hi=ny; else hi+=(ny-hi)*0.02;
-  const span=hi-lo;
-  targetU=Math.max(0,Math.min(1, span<MINSPAN ? 0.5+(ny-(lo+hi)/2)/(MINSPAN*2) : (ny-lo)/span));
-}
+function feedNose(ny){ faceSeen=true; faceMiss=0; noseY=ny; }   // 1:1, no gain
 
 async function start(){
   msg.querySelector('#go').disabled=true; stat.textContent='starting camera…';
@@ -120,8 +114,8 @@ function drawScene(now, dt){
     if(!faceSeen) faceMiss+=dt;
     bird.py=bird.y;
     if(faceSeen || faceMiss<0.4){
-      const targetY=(0.11+targetU*0.74)*(H-groundOf(H));
-      bird.y+=(targetY-bird.y)*Math.min(1,dt*11);
+      const targetY=Math.max(bird.r, Math.min(groundY-bird.r, noseY*H));   // 1:1 with the face
+      bird.y+=(targetY-bird.y)*Math.min(1,dt*16);
     }
     const speed=Math.min(W*0.5, W*0.30+score*W*0.006);
     for(const p of pipes) p.x-=speed*dt;
