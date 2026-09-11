@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PUSHUP FLAPPY</title>
+<style>
+  html,body{margin:0;height:100%;background:#4ec0ca;overflow:hidden;
+    font-family:"Press Start 2P","Courier New",monospace;color:#fff;-webkit-tap-highlight-color:transparent;}
+  #cv{position:fixed;inset:0;width:100%;height:100%;display:block}
+  #msg{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:24px;gap:18px;background:#4ec0ca;z-index:3}
+  #msg h1{font-size:clamp(16px,5vw,28px);margin:0;text-shadow:0 3px 0 #4a3a1a}
+  #msg p{font-size:clamp(9px,2.6vw,12px);line-height:1.9;max-width:22em;color:#fffbe6;text-shadow:0 2px 0 rgba(74,58,26,.6)}
+  #go{font-size:12px;padding:16px 26px;border:3px solid #fff;border-radius:10px;background:#4a3a1a;color:#fff;
+    cursor:pointer;font-family:inherit;box-shadow:0 5px 0 rgba(0,0,0,.4)}
+  #go:active{transform:translateY(3px);box-shadow:0 2px 0 rgba(0,0,0,.4)}
+  .hide{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="msg">
+  <h1>PUSHUP FLAPPY</h1>
+  <p>Flappy Bird flown by your FACE. There is no tapping. Your face height moves the bird, so you fly it by doing pushups in front of the camera. Thread the pipes.</p>
+  <button id="go">START (allow camera)</button>
+  <p id="stat" style="opacity:.8"></p>
+</div>
+<script type="module">
+import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const msg = document.getElementById('msg'), stat = document.getElementById('stat');
+let W = 0, H = 0, DPR = 1;
+function resize(){ DPR = Math.min(devicePixelRatio||1,2); W=innerWidth; H=innerHeight;
+  cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR); cv.style.width=W+'px'; cv.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0); }
+addEventListener('resize', resize); resize();
+
+// classic flappy palette
+const STEM='#73bf2e', LIP='#8fdc3f', RIND='#3f6a17', INK='#4a3a1a',
+      BODY='#ffd94a', WING='#fff4c2', BEAK='#ff9b2f', BELLY='#ffb733';
+
+let video, pose, running=false;
+let lo=0.40, hi=0.60, targetU=0.5, faceSeen=false, faceMiss=999;
+let bird=null, pipes=[], score=0, best=0, groundY=0, phase='idle', overAt=0;
+const MINSPAN=0.10;
+function groundOf(h){ return Math.max(64, h*0.11); }
+function spacing(w){ return Math.max(230, w*0.64); }
+function spawnPipe(x){ const playH=H-groundOf(H);
+  const gap=Math.max(playH*0.30,(0.30-score*0.006)*playH), top=playH*0.13, lowest=playH-gap-top;
+  pipes.push({x, gy: top+Math.random()*lowest, gap, w:Math.max(58,W*0.16), passed:false}); }
+function startRun(){ groundY=H-groundOf(H); lo=0.40; hi=0.60; targetU=0.5; faceMiss=999;
+  bird={x:W*0.30,y:H*0.45,r:Math.max(17,Math.min(W*0.06,H*0.036)),py:H*0.45}; pipes=[]; score=0;
+  spawnPipe(W*1.7); spawnPipe(W*1.7+spacing(W)); phase='play'; }
+
+function feedNose(ny){
+  faceSeen=true; faceMiss=0;
+  if(ny<lo) lo=ny; else lo+=(ny-lo)*0.02;
+  if(ny>hi) hi=ny; else hi+=(ny-hi)*0.02;
+  const span=hi-lo;
+  targetU=Math.max(0,Math.min(1, span<MINSPAN ? 0.5+(ny-(lo+hi)/2)/(MINSPAN*2) : (ny-lo)/span));
+}
+
+async function start(){
+  msg.querySelector('#go').disabled=true; stat.textContent='starting camera…';
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:640,height:480},audio:false});
+    video=document.createElement('video'); video.playsInline=true; video.muted=true; video.srcObject=stream;
+    await video.play();
+  }catch(e){ stat.textContent='camera blocked: '+e.message; msg.querySelector('#go').disabled=false; return; }
+  stat.textContent='loading pose model…';
+  try{
+    const fileset=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm");
+    pose=await PoseLandmarker.createFromOptions(fileset,{
+      baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task", delegate:"GPU" },
+      runningMode:"VIDEO", numPoses:1 });
+  }catch(e){ stat.textContent='model failed: '+e.message; msg.querySelector('#go').disabled=false; return; }
+  msg.classList.add('hide'); running=true; startRun(); requestAnimationFrame(loop);
+}
+document.getElementById('go').addEventListener('click', start);
+
+let lastVideoTs=-1, tPrev=0;
+function loop(now){
+  requestAnimationFrame(loop);
+  const dt = tPrev ? Math.min(0.05,(now-tPrev)/1000) : 0; tPrev=now;
+  groundY=H-groundOf(H);
+
+  // pose detect (video runs on its own clock)
+  if(pose && video && video.currentTime!==lastVideoTs){
+    lastVideoTs=video.currentTime;
+    try{
+      const res=pose.detectForVideo(video, now);
+      if(res && res.landmarks && res.landmarks[0]){
+        const nose=res.landmarks[0][0];
+        if(nose && (nose.visibility==null || nose.visibility>0.4)) feedNose(nose.y);
+        else faceSeen=false;
+      } else faceSeen=false;
+    }catch(_){ faceSeen=false; }
+  }
+
+  drawScene(now, dt);
+}
+
+function drawScene(now, dt){
+  // cover-draw mirrored video correctly
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#4ec0ca'; ctx.fillRect(0,0,W,H);
+  if(video && video.videoWidth){
+    const vw=video.videoWidth, vh=video.videoHeight, vr=vw/vh, sr=W/H; let dw,dh,dx,dy;
+    if(vr>sr){ dh=H; dw=H*vr; dx=(W-dw)/2; dy=0; } else { dw=W; dh=W/vr; dx=0; dy=(H-dh)/2; }
+    ctx.save(); ctx.translate(W,0); ctx.scale(-1,1);
+    ctx.drawImage(video, W-dx-dw, dy, dw, dh);
+    ctx.restore();
+  }
+  // translucent cyan sky wash so the room ghosts through
+  ctx.fillStyle='rgba(78,192,202,.5)'; ctx.fillRect(0,0,W,H);
+
+  if(phase==='play'){
+    if(!faceSeen) faceMiss+=dt;
+    bird.py=bird.y;
+    if(faceSeen || faceMiss<0.4){
+      const targetY=(0.11+targetU*0.74)*(H-groundOf(H));
+      bird.y+=(targetY-bird.y)*Math.min(1,dt*11);
+    }
+    const speed=Math.min(W*0.5, W*0.30+score*W*0.006);
+    for(const p of pipes) p.x-=speed*dt;
+    if(pipes.length && pipes[pipes.length-1].x < W-spacing(W)) spawnPipe(W+40);
+    while(pipes.length && pipes[0].x+pipes[0].w < -10) pipes.shift();
+    for(const p of pipes){
+      if(!p.passed && p.x+p.w<bird.x){ p.passed=true; score++; }
+      const inX = bird.x+bird.r>p.x && bird.x-bird.r<p.x+p.w;
+      if(inX && (bird.y-bird.r<p.gy || bird.y+bird.r>p.gy+p.gap)){ if(score>best) best=score; phase='over'; overAt=now; }
+    }
+    if(bird.y<bird.r) bird.y=bird.r;
+    if(bird.y+bird.r>groundY) bird.y=groundY-bird.r;
+  } else if(phase==='over'){
+    if(now-overAt>1200) startRun();   // hands-free restart, same as the feed format
+  }
+
+  // pipes
+  for(const p of pipes){
+    const lip=Math.max(13,H*0.02);
+    slab(p.x,-12,p.w,p.gy+12,STEM,6,RIND,3);
+    slab(p.x,p.gy+p.gap,p.w,groundY-(p.gy+p.gap)+4,STEM,6,RIND,3);
+    ctx.fillStyle='rgba(255,255,255,.28)';
+    ctx.fillRect(p.x+p.w*0.16,0,Math.max(3,p.w*0.12),p.gy);
+    ctx.fillRect(p.x+p.w*0.16,p.gy+p.gap+lip,Math.max(3,p.w*0.12),groundY);
+    slab(p.x-7,p.gy-lip,p.w+14,lip,LIP,5,RIND,3);
+    slab(p.x-7,p.gy+p.gap,p.w+14,lip,LIP,5,RIND,3);
+  }
+  // ground
+  ctx.fillStyle='rgba(222,216,149,.92)'; ctx.fillRect(0,groundY,W,H-groundY);
+  slab(-4,groundY-6,W+8,14,STEM,0,RIND,3);
+  ctx.fillStyle='rgba(63,106,23,.5)';
+  const seam=((now*0.06)%24); for(let i=-1;i*24-seam<W;i++) ctx.fillRect(i*24-seam,groundY+12,12,5);
+
+  // bird
+  if(bird){
+    const vy=(bird.y-bird.py)/Math.max(0.001,dt||0.016);
+    const tilt=Math.max(-0.5,Math.min(0.9,vy/900));
+    ctx.save(); ctx.translate(bird.x,bird.y); ctx.rotate(tilt);
+    const beat=Math.sin(now*0.02)*0.5, r=bird.r;
+    orb(0,0,r,BODY,INK);
+    ctx.fillStyle=BELLY; ctx.beginPath(); ctx.arc(0,r*0.28,r*0.62,0,7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(-r*0.24,r*0.06,r*0.5,r*0.24,beat*0.7,0,7); ctx.fillStyle=WING; ctx.fill();
+    ctx.strokeStyle=INK; ctx.lineWidth=2.4; ctx.stroke();
+    ctx.fillStyle=BEAK; ctx.beginPath(); ctx.moveTo(r*0.66,-r*0.06); ctx.lineTo(r*1.34,r*0.12); ctx.lineTo(r*0.66,r*0.3); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle=INK; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(r*0.4,-r*0.34,r*0.3,0,7); ctx.fill(); ctx.strokeStyle=INK; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle=INK; ctx.beginPath(); ctx.arc(r*0.5,-r*0.32,r*0.13,0,7); ctx.fill();
+    ctx.restore();
+  }
+
+  // HUD
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  pixText(String(score), W/2, 24+ (H*0.02), Math.max(20,Math.min(W*0.09,40)));
+  pixText('BEST '+best, W/2, 24+(H*0.02)+Math.max(24,W*0.11), Math.max(8,Math.min(W*0.032,14)));
+
+  // instruction / status
+  ctx.textBaseline='alphabetic';
+  const line = phase==='over' ? (score>=best&&score>0 ? 'NEW BEST! '+score : 'WIPED OUT') :
+               (faceSeen||faceMiss<1.2 ? 'DO PUSHUPS TO FLY' : 'GET BACK IN SHOT');
+  pixText(line, W/2, groundY-14, Math.max(8,Math.min(W*0.03,13)), phase==='over' ? '#ff5a3c' : '#fff');
+}
+
+function slab(x,y,w,h,fill,r,edge,lw){
+  ctx.beginPath();
+  if(r>0){ const rr=Math.min(r,w/2,h/2); ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr); ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); }
+  else ctx.rect(x,y,w,h);
+  ctx.closePath(); ctx.fillStyle=fill; ctx.fill();
+  if(edge){ ctx.strokeStyle=edge; ctx.lineWidth=lw||2; ctx.stroke(); }
+}
+function orb(x,y,r,fill,rim){ ctx.beginPath(); ctx.arc(x,y,r+2.5,0,7); ctx.fillStyle=rim; ctx.fill();
+  ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fillStyle=fill; ctx.fill();
+  ctx.beginPath(); ctx.arc(x-r*0.32,y-r*0.34,r*0.3,0,7); ctx.fillStyle='rgba(255,255,255,.42)'; ctx.fill(); }
+function pixText(str,x,y,size,color){
+  ctx.font=size+'px "Press Start 2P","Courier New",monospace';
+  ctx.lineJoin='round'; ctx.lineWidth=Math.max(4,size*0.5); ctx.strokeStyle='rgba(74,58,26,.9)';
+  ctx.strokeText(str,x,y); ctx.fillStyle=color||'#fff'; ctx.fillText(str,x,y);
+}
+</script>
+</body>
+</html>
